@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "777455928832",
+    "project_id": "qrux-11a39",
+    "storage_bucket": "qrux-11a39.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:777455928832:android:3cd1bef0826f013aa1fae5",
+        "android_client_info": {
+          "package_name": "com.example.qrux"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDT78HQ0mPNow7_x23TR8eCLEipSKwy-x8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
