@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:crypto/crypto.dart';
-
-import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -42,19 +39,24 @@ class SessionStore {
 
   static String? get staffName => _preferences.getString('staffName');
   static String? get staffAdminUid => _preferences.getString('staffAdminUid');
-  static bool get hasStaffSession => staffName != null && staffAdminUid != null;
+  static String? get staffUid => _preferences.getString('staffUid');
+  static bool isStaffUser(String? uid) =>
+      uid != null && uid == staffUid && staffAdminUid != null;
 
   static Future<void> saveStaffSession({
     required String name,
     required String adminUid,
+    required String staffUid,
   }) async {
     await _preferences.setString('staffName', name);
     await _preferences.setString('staffAdminUid', adminUid);
+    await _preferences.setString('staffUid', staffUid);
   }
 
   static Future<void> clearStaffSession() async {
     await _preferences.remove('staffName');
     await _preferences.remove('staffAdminUid');
+    await _preferences.remove('staffUid');
   }
 }
 
@@ -70,20 +72,24 @@ class _SplashState extends State<SplashScreen>
     vsync: this,
     duration: const Duration(milliseconds: 1400),
   )..forward();
+
+  @override
   void initState() {
     super.initState();
-    Future.delayed(const Duration(seconds: 2), () {
+    Future.delayed(const Duration(seconds: 2), () async {
       if (mounted) {
+        final user = FirebaseAuth.instance.currentUser;
+        final isStaff = SessionStore.isStaffUser(user?.uid);
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
-            builder: (_) => FirebaseAuth.instance.currentUser != null
-                ? const Dashboard()
-                : SessionStore.hasStaffSession
+            builder: (_) => isStaff
                 ? Dashboard(
                     staffName: SessionStore.staffName,
                     staffAdminUid: SessionStore.staffAdminUid,
                   )
+                : user != null
+                ? const Dashboard()
                 : const RoleScreen(),
           ),
         );
@@ -194,33 +200,52 @@ class _StaffLoginScreenState extends State<StaffLoginScreen> {
     }
     setState(() => loading = true);
     try {
-      final result = await FirebaseFirestore.instance
-          .collection('staff')
-          .where('email', isEqualTo: emailValue)
-          .where('status', isEqualTo: 'active')
-          .limit(1)
-          .get();
-      final record = result.docs.firstOrNull;
-      final hash = sha256.convert(utf8.encode(passwordValue)).toString();
-      if (record == null || record.data()['passwordHash'] != hash) {
-        showMessage(context, 'Invalid staff credentials.');
+      final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: emailValue,
+        password: passwordValue,
+      );
+      if (!mounted) return;
+      final staffUser = credential.user;
+      if (staffUser == null) {
+        showMessage(context, 'Staff account could not be verified.');
         return;
       }
+
+      final profile = await FirebaseFirestore.instance
+          .collection('staff')
+          .doc(staffUser.uid)
+          .get();
       if (!mounted) return;
+      final data = profile.data();
+      final adminUid = data?['adminUid'] as String?;
+      if (!profile.exists || data?['status'] != 'active' || adminUid == null) {
+        await FirebaseAuth.instance.signOut();
+        if (!mounted) return;
+        showMessage(context, 'Staff access is inactive or has been removed.');
+        return;
+      }
+
       await SessionStore.saveStaffSession(
-        name: record.data()['name'] as String? ?? emailValue,
-        adminUid: record.data()['adminUid'] as String? ?? '',
+        name: data?['name'] as String? ?? emailValue,
+        adminUid: adminUid,
+        staffUid: staffUser.uid,
       );
+      if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
           builder: (_) => Dashboard(
-            staffName: record.data()['name'] as String? ?? emailValue,
-            staffAdminUid: record.data()['adminUid'] as String?,
+            staffName: data?['name'] as String? ?? emailValue,
+            staffAdminUid: adminUid,
           ),
         ),
       );
+    } on FirebaseAuthException catch (error) {
+      if (mounted) {
+        showMessage(context, error.message ?? 'Invalid staff credentials.');
+      }
     } on FirebaseException catch (error) {
+      await FirebaseAuth.instance.signOut();
       if (mounted) showMessage(context, error.message ?? 'Could not sign in.');
     } finally {
       if (mounted) setState(() => loading = false);

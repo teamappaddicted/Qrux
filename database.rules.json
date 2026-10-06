@@ -1,0 +1,32 @@
+{
+  "rules": {
+    "containers": {
+      "$containerId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "command": {
+          ".read": "auth != null && ((data.parent().child('deviceId').val() != null && root.child('devices').child(data.parent().child('deviceId').val()).child('uid').val() == auth.uid) || data.parent().child('adminId').val() == auth.uid || root.child('admins').child(data.parent().child('adminId').val()).child('staff').child(auth.uid).child('active').val() == true)",
+          ".write": "auth != null && ((data.parent().child('adminId').val() == auth.uid && (newData.val() == 'STOP' || newData.val() == 'OPEN' || newData.val() == 'CLOSE' || newData.val() == 'FORWARD' || newData.val() == 'BACKWARD' || newData.val() == 'LEFT' || newData.val() == 'RIGHT')) || (root.child('admins').child(data.parent().child('adminId').val()).child('staff').child(auth.uid).child('active').val() == true && (newData.val() == 'OPEN' || newData.val() == 'CLOSE')))",
+          ".validate": "newData.isString() && (newData.val() == 'STOP' || newData.val() == 'OPEN' || newData.val() == 'CLOSE' || newData.val() == 'FORWARD' || newData.val() == 'BACKWARD' || newData.val() == 'LEFT' || newData.val() == 'RIGHT')"
+        },
+        "online": {
+          ".read": "auth != null && ((data.parent().child('deviceId').val() != null && root.child('devices').child(data.parent().child('deviceId').val()).child('uid').val() == auth.uid) || data.parent().child('adminId').val() == auth.uid || root.child('admins').child(data.parent().child('adminId').val()).child('staff').child(auth.uid).child('active').val() == true)",
+          ".write": "auth != null && data.parent().child('deviceId').val() != null && root.child('devices').child(data.parent().child('deviceId').val()).child('uid').val() == auth.uid",
+          ".validate": "newData.isBoolean()"
+        }
+      }
+    },
+    "admins": {
+      "$adminUid": {
+        "staff": {
+          "$staffUid": {
+            "active": {
+              ".write": "auth != null && auth.uid == $adminUid",
+              ".validate": "!newData.exists() || newData.val() == true"
+            }
+          }
+        }
+      }
+    }
+  }
+}

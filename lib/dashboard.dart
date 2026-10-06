@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:crypto/crypto.dart';
 
 import 'dart:convert';
@@ -16,14 +18,14 @@ class Dashboard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
-    final ownerUid = user?.uid ?? staffAdminUid;
-    if (ownerUid == null) return const AuthScreen();
-    if (user == null && staffAdminUid != null) {
+    if (staffAdminUid != null && SessionStore.isStaffUser(user?.uid)) {
       return StaffDashboard(
         name: staffName ?? 'Staff',
         adminUid: staffAdminUid!,
       );
     }
+    final ownerUid = user?.uid ?? staffAdminUid;
+    if (ownerUid == null) return const AuthScreen();
     final containers = FirebaseFirestore.instance
         .collection('containers')
         .where('ownerUid', isEqualTo: ownerUid)
@@ -220,6 +222,7 @@ class StaffDashboard extends StatelessWidget {
             tooltip: 'Sign out',
             icon: const Icon(Icons.logout),
             onPressed: () async {
+              await FirebaseAuth.instance.signOut();
               await SessionStore.clearStaffSession();
               if (context.mounted) {
                 Navigator.pushAndRemoveUntil(
@@ -248,6 +251,18 @@ class StaffDashboard extends StatelessWidget {
                 'Assigned containers',
                 style: TextStyle(fontSize: 30, fontWeight: FontWeight.bold),
               ),
+              const SizedBox(height: 12),
+              ActionRow(
+                icon: Icons.qr_code_scanner,
+                title: 'Scan a container',
+                detail: 'Open, close, and update container details',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const ScanScreen(staffMode: true),
+                  ),
+                ),
+              ),
               const SizedBox(height: 24),
               Metric(
                 '${docs.length}',
@@ -265,7 +280,7 @@ class StaffDashboard extends StatelessWidget {
                   onTap: () => Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (_) => ContainerDetails(
+                      builder: (_) => StaffContainerDetails(
                         containerId: doc.id,
                         data: doc.data(),
                       ),
@@ -352,37 +367,94 @@ class _StaffScreenState extends State<StaffScreen> {
       );
       return;
     }
+
     setState(() => saving = true);
+    FirebaseAuth? provisioningAuth;
     try {
       final existing = await FirebaseFirestore.instance
           .collection('staff')
+          .where('adminUid', isEqualTo: admin.uid)
           .where('email', isEqualTo: emailValue)
           .limit(1)
           .get();
       if (existing.docs.isNotEmpty) {
-        if (mounted)
+        if (mounted) {
           showMessage(context, 'A staff account already uses this email.');
+        }
         return;
       }
-      await FirebaseFirestore.instance.collection('staff').add({
-        'adminUid': admin.uid,
-        'name': name.text.trim(),
-        'email': emailValue,
-        'passwordHash': sha256.convert(utf8.encode(password.text)).toString(),
-        'status': 'active',
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+
+      const provisioningAppName = 'qrux-staff-provisioning';
+      FirebaseApp provisioningApp;
+      try {
+        provisioningApp = Firebase.app(provisioningAppName);
+      } on FirebaseException {
+        provisioningApp = await Firebase.initializeApp(
+          name: provisioningAppName,
+          options: Firebase.app().options,
+        );
+      }
+      provisioningAuth = FirebaseAuth.instanceFor(app: provisioningApp);
+
+      final credential = await provisioningAuth.createUserWithEmailAndPassword(
+        email: emailValue,
+        password: password.text,
+      );
+      final staffUid = credential.user?.uid;
+      if (staffUid == null) {
+        throw StateError('Firebase did not return the new staff account ID.');
+      }
+
+      try {
+        await FirebaseFirestore.instance.collection('staff').doc(staffUid).set({
+          'adminUid': admin.uid,
+          'name': name.text.trim(),
+          'email': emailValue,
+          'status': 'active',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      } catch (_) {
+        await provisioningAuth.currentUser?.delete();
+        rethrow;
+      }
+
+      var realtimeAccessReady = true;
+      try {
+        await FirebaseDatabase.instanceFor(
+          app: Firebase.app(),
+          databaseURL: databaseUrl,
+        ).ref('admins/${admin.uid}/staff/$staffUid/active').set(true);
+      } on FirebaseException {
+        realtimeAccessReady = false;
+      }
+
       name.clear();
       email.clear();
       password.clear();
-      if (mounted) showMessage(context, 'Staff account created.');
-    } on FirebaseException catch (error) {
-      if (mounted)
+      if (mounted) {
+        showMessage(
+          context,
+          realtimeAccessReady ? 'Staff account created.' : 'Staff account created. Realtime Database rules must allow the admin to add its staff access link.',
+        );
+      }
+    } on FirebaseAuthException catch (error) {
+      if (mounted) {
         showMessage(
           context,
           error.message ?? 'Could not create staff account.',
         );
+      }
+    } on FirebaseException catch (error) {
+      if (mounted) {
+        showMessage(
+          context,
+          error.message ?? 'Could not create staff account.',
+        );
+      }
+    } catch (error) {
+      if (mounted) showMessage(context, error.toString());
     } finally {
+      await provisioningAuth?.signOut();
       if (mounted) setState(() => saving = false);
     }
   }
@@ -452,9 +524,28 @@ class _StaffScreenState extends State<StaffScreen> {
                         tooltip: 'Delete staff record',
                         icon: const Icon(Icons.delete_outline),
                         onPressed: () async {
-                          await docs[index].reference.delete();
-                          if (context.mounted)
-                            showMessage(context, 'Staff record deleted.');
+                          try {
+                            await FirebaseDatabase.instanceFor(
+                                  app: Firebase.app(),
+                                  databaseURL: databaseUrl,
+                                )
+                                .ref(
+                                  'admins/${admin?.uid}/staff/${docs[index].id}',
+                                )
+                                .remove();
+                            await docs[index].reference.delete();
+                            if (context.mounted) {
+                              showMessage(context, 'Staff access removed.');
+                            }
+                          } on FirebaseException catch (error) {
+                            if (context.mounted) {
+                              showMessage(
+                                context,
+                                error.message ??
+                                    'Could not remove staff access.',
+                              );
+                            }
+                          }
                         },
                       ),
                     );
